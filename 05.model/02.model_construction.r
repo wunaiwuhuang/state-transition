@@ -145,12 +145,9 @@ find_optimal_c2 <- function(critical_points, sample_info, alpha, kBT, n_grid = 2
   U_c3_values_wt <- numeric(n_grid)
   for (i in seq_along(c2_wt_range)) {
     c2_wt_test <- c2_wt_range[i]
-
     U_c1_wt <- calculate_potential(c1_star, alpha, c1_star, c2_wt_test, c3)
     U_c3_wt <- calculate_potential(c3, alpha, c1_star, c2_wt_test, c3)
-
     br_values_wt[i] <- calculate_boltzmann_ratio(U_c1_wt, U_c3_wt, kBT)
-
     U_c1_values_wt[i] <- U_c1_wt
     U_c3_values_wt[i] <- U_c3_wt
   }
@@ -208,6 +205,7 @@ build_state_transition_model <- function(x_wt, x_ko, sample_info, alpha = 4.85e-
   # WT group
   c1_star <- critical_points$c1_star
   c2_wt <- c2_results$c2_optimal_wt
+  c3 <- critical_points$c3
   U_c1_wt <- calculate_potential(c1_star, alpha, c1_star, c2_wt, c3)
   U_c2_wt <- calculate_potential(c2_wt, alpha, c1_star, c2_wt, c3)
   U_c3_wt <- calculate_potential(c3, alpha, c1_star, c2_wt, c3)
@@ -223,7 +221,9 @@ build_state_transition_model <- function(x_wt, x_ko, sample_info, alpha = 4.85e-
       c2_wt = c2_wt,
       c1 = c1,
       c2 = c2,
-      c3 = c3
+      c3 = c3,
+      kmeans_result = critical_points$kmeans_result,
+      sorted_centers = critical_points$sorted_centers
     ),
     c2_search = c2_results,
     energy_barrier_ko = energy_barrier_ko,
@@ -467,6 +467,7 @@ plot_c2_selection <- function(model_results) {
          subtitle = "Matching predicted BR to observed disease/health ratio") +
     theme_minimal() +
     scale_x_reverse() +        # x axis from high to low PC
+    scale_y_continuous(limits = c(0, 500)) + # adjust as needed
     theme(
       panel.grid.minor = element_blank(),
       plot.title = element_text(hjust = 0.5, face = "bold"),
@@ -538,7 +539,7 @@ model_results <- build_state_transition_model(x_wt, x_ko, sample_info_pcs,alpha 
 # Generate plots
 p1 <- plot_potential_curves(model_results)
 p2 <- plot_sample_density(model_results)
-p3 <- plot_c2_exploration(model_results, n_curves = 10)
+p3 <- plot_c2_exploration(model_results, n_curves = 20)
 p4 <- plot_c2_selection(model_results)
 
 # Display or save plots
@@ -547,6 +548,7 @@ print(p2)
 print(p3)
 print(p4)
 
+save(model_results, file = paste0(file.path(basedir, "05.model/"), "model_results.rdata"))
 ggsave(paste0(file.path(basedir, "05.model/"), "potential_curves.pdf"), p1, width = 8, height = 6)
 ggsave(paste0(file.path(basedir, "05.model/"), "sample_density.pdf"), p2, width = 8, height = 6)
 ggsave(paste0(file.path(basedir, "05.model/"), "c2_exploration.pdf"), p3, width = 8, height = 6)
