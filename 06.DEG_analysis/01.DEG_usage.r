@@ -7,7 +7,7 @@ count_file <- file.path(base_dir, "04.standardization", "01.counts_raw.txt")
 count_mat <- as.matrix(read.delim(count_file, row.names = 1, check.names = FALSE))
 load(file.path(base_dir, "05.model", "model_results.rdata"))
 # load scripts
-source(file.path(base_dir, "06.DEG_pathway", "00.DEG_DESeq2_script.r"))
+source(file.path(base_dir, "06.DEG_analysis", "00.DEG_DESeq2_script.r"))
 
 # create sample info
 sample <- c(model_results$x_wt, model_results$x_ko) %>% as.data.frame()
