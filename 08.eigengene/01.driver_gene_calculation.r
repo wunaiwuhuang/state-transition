@@ -474,11 +474,12 @@ select_driver_genes <- function(contrib_data_list, gene_annotations, vst_mat,
         filter(gene_biotype == "protein_coding")
       cat("After protein-coding filter:", nrow(driver_candidates), "\n")
     }
+    
     # Filter 7: Remove sex chromosome genes
     driver_candidates <- driver_candidates %>%
       filter(!seqnames %in% c("X", "Y", "chrX", "chrY"))
     cat("After sex chromosome filter:", nrow(driver_candidates), "\n")
-
+    
     # Rank by contribution score
     driver_candidates <- driver_candidates %>%
       arrange(desc(abs(contribution_score))) %>%
@@ -492,8 +493,86 @@ select_driver_genes <- function(contrib_data_list, gene_annotations, vst_mat,
   # Name the list elements by contrast
   names(result_list) <- names(contrib_data_list)
   
+  # --- Filter 8: Check consistency across contrasts for overlapping genes ---
+  cat("\n=== Checking consistency across contrasts ===\n")
+  
+  # Find overlapping genes
+  all_genes <- lapply(result_list, function(df) df$gene_id)
+  gene_counts <- table(unlist(all_genes))
+  overlapping_genes <- names(gene_counts[gene_counts > 1])
+  
+  if (length(overlapping_genes) > 0) {
+    cat("Found", length(overlapping_genes), "genes present in multiple contrasts\n")
+    
+    # Check consistency for each overlapping gene
+    inconsistent_genes <- c()
+    
+    for (gene in overlapping_genes) {
+      # Extract info from all contrasts containing this gene
+      gene_info <- lapply(names(result_list), function(contrast_name) {
+        gene_row <- result_list[[contrast_name]] %>% 
+          filter(gene_id == gene)
+        
+        if (nrow(gene_row) > 0) {
+          data.frame(
+            contrast = contrast_name,
+            gene_id = gene,
+            cgd_loading = gene_row$cgd_loading[1],
+            is_upregulated = gene_row$is_upregulated[1],
+            is_cis = gene_row$is_cis[1],
+            stringsAsFactors = FALSE
+          )
+        } else {
+          NULL
+        }
+      })
+      
+      gene_info <- do.call(rbind, gene_info[!sapply(gene_info, is.null)])
+      
+      # Check consistency
+      # 1. Loading direction should be consistent (all cis or all trans)
+      loading_consistent <- length(unique(gene_info$is_cis)) == 1
+      
+      # 2. DEG direction should be consistent (all up or all down)
+      deg_consistent <- length(unique(gene_info$is_upregulated)) == 1
+      
+      if (!loading_consistent || !deg_consistent) {
+        inconsistent_genes <- c(inconsistent_genes, gene)
+        cat("  Inconsistent gene:", gene, "\n")
+        print(gene_info[, c("contrast", "is_cis", "is_upregulated")])
+      }
+    }
+    
+    # Remove inconsistent genes from all contrasts
+    if (length(inconsistent_genes) > 0) {
+      cat("\nRemoving", length(inconsistent_genes), "inconsistent genes from all contrasts\n")
+      
+      result_list <- lapply(names(result_list), function(contrast_name) {
+        df <- result_list[[contrast_name]]
+        df_filtered <- df %>% filter(!gene_id %in% inconsistent_genes)
+        
+        n_removed <- nrow(df) - nrow(df_filtered)
+        if (n_removed > 0) {
+          cat("  ", contrast_name, ": removed", n_removed, "genes\n")
+        }
+        
+        # Re-rank after removal
+        df_filtered <- df_filtered %>%
+          arrange(desc(abs(contribution_score))) %>%
+          mutate(rank = row_number())
+        
+        return(df_filtered)
+      })
+      names(result_list) <- names(contrib_data_list)
+    } else {
+      cat("All overlapping genes are consistent across contrasts\n")
+    }
+  } else {
+    cat("No overlapping genes found across contrasts\n")
+  }
+  
   # Print overall summary
-  cat("\n=== Overall Summary ===\n")
+  cat("\n=== Overall Summary (After Consistency Check) ===\n")
   for (contrast_name in names(result_list)) {
     cat(sprintf("%-12s: %4d driver genes\n", 
                 contrast_name, nrow(result_list[[contrast_name]])))
@@ -501,6 +580,7 @@ select_driver_genes <- function(contrib_data_list, gene_annotations, vst_mat,
   
   return(result_list)
 }
+
 
 #' Classify Driver Genes by Expression Pattern
 #' 

@@ -6,6 +6,7 @@
 library(tidyverse)
 library(rtracklayer)
 library(ggplot2)
+library(ComplexUpset)
 library(dplyr)
 
 BASE_DIR <- "/disk2/cai113/data/stateTrans"
@@ -805,6 +806,463 @@ plot_driver_genes_in_cone <- function(eigengenes_in_cone,
 
 
 # ============================================================================
+# PART 6: UpSet Plot of Driver Genes Across Contrasts
+# ============================================================================
+
+#' Plot UpSet Diagram for Driver Genes Across Contrasts (Simple Version)
+#'
+#' This function visualizes the overlap of driver genes across multiple contrasts
+#' using an UpSet plot. All advanced features (e.g., gene labeling) are removed
+#' for maximum stability and compatibility.
+#'
+#' @param driver_genes_list A named list of data frames, each with at least:
+#'   - `gene_id`: unique gene identifier
+#' @param contrasts Character vector of contrast names to include.
+#'   If NULL, all contrasts in `driver_genes_list` are used.
+#' @param filter_pattern Expression pattern to retain (e.g., "Upregulated-Cis...").
+#'   If NULL, no filtering.
+#' @param filter_loading_strength Loading strength filter (e.g., "Strong").
+#' @param filter_fc_strength Fold-change strength filter (e.g., "Strong (>4-fold)").
+#' @param top_n_intersections Number of top intersections to show. Default: 20.
+#'
+#' @return A `ggplot` object.
+plot_driver_genes_upset <- function(driver_genes_list,
+                                    contrasts = NULL,
+                                    filter_pattern = NULL,
+                                    filter_loading_strength = NULL,
+                                    filter_fc_strength = NULL,
+                                    top_n_intersections = 20) {
+  
+  if (!requireNamespace("ComplexUpset", quietly = TRUE)) {
+    stop("Package 'ComplexUpset' is required. Install via: install.packages('ComplexUpset')")
+  }
+  if (!requireNamespace("dplyr", quietly = TRUE)) stop("Package 'dplyr' is required.")
+  
+  library(ComplexUpset)
+  library(dplyr)
+  
+  # Step 1: Select contrasts
+  if (is.null(contrasts)) {
+    contrasts <- names(driver_genes_list)
+  } else {
+    invalid <- contrasts[!contrasts %in% names(driver_genes_list)]
+    if (length(invalid) > 0) {
+      stop("Invalid contrast names: ", paste(invalid, collapse = ", "))
+    }
+  }
+  
+  cat("=== Creating UpSet plot ===\n")
+  cat("Contrasts:", paste(contrasts, collapse = ", "), "\n")
+  
+  # Step 2: Apply filters and extract gene sets
+  gene_sets <- lapply(contrasts, function(contrast_name) {
+    df <- driver_genes_list[[contrast_name]]
+    if (!is.null(filter_pattern)) {
+      df <- df %>% filter(expression_pattern == filter_pattern)
+    }
+    if (!is.null(filter_loading_strength)) {
+      df <- df %>% filter(loading_strength == filter_loading_strength)
+    }
+    if (!is.null(filter_fc_strength)) {
+      df <- df %>% filter(fc_strength == filter_fc_strength)
+    }
+    return(df$gene_id)
+  })
+  names(gene_sets) <- contrasts
+  
+  # Print filters and gene counts
+  if (!is.null(filter_pattern) || !is.null(filter_loading_strength) || !is.null(filter_fc_strength)) {
+    cat("\nFilters applied:\n")
+    if (!is.null(filter_pattern)) cat("  Pattern:", filter_pattern, "\n")
+    if (!is.null(filter_loading_strength)) cat("  Loading:", filter_loading_strength, "\n")
+    if (!is.null(filter_fc_strength)) cat("  FC:", filter_fc_strength, "\n")
+  }
+  
+  cat("\nGenes per contrast:\n")
+  for (i in seq_along(gene_sets)) {
+    cat(sprintf("  %-15s: %4d\n", names(gene_sets)[i], length(gene_sets[[i]])))
+  }
+  
+  # Step 3: Build universe
+  all_genes <- unique(unlist(gene_sets))
+  if (length(all_genes) == 0) stop("No genes after filtering!")
+  cat("\nTotal unique genes:", length(all_genes), "\n")
+  
+  # Step 4: Create binary matrix
+  upset_data <- data.frame(gene_id = all_genes, stringsAsFactors = FALSE)
+  for (contrast in contrasts) {
+    upset_data[[contrast]] <- upset_data$gene_id %in% gene_sets[[contrast]]
+  }
+  
+  # Step 5: Build title
+  title_parts <- "Driver Genes Overlap"
+  if (!is.null(filter_pattern) || !is.null(filter_loading_strength) || !is.null(filter_fc_strength)) {
+    filters <- c()
+    if (!is.null(filter_pattern)) filters <- c(filters, gsub(" \\(.*\\)", "", filter_pattern))
+    if (!is.null(filter_loading_strength)) filters <- c(filters, filter_loading_strength)
+    if (!is.null(filter_fc_strength)) filters <- c(filters, gsub(" \\(.*\\)", "", filter_fc_strength))
+    title_parts <- paste0(title_parts, " (", paste(filters, collapse = ", "), ")")
+  }
+  
+  # Step 6: Generate plot — NO LABELS, NO EXTRA LAYERS
+  p <- upset(
+    data = upset_data,
+    intersect = contrasts,
+    width_ratio = 0.4,
+    sort_intersections = "descending",
+    n_intersections = top_n_intersections,
+    themes = upset_default_themes(
+      text = element_text(size = 12),
+      strip_text = element_text(size = 11, face = "bold")
+    )
+  ) +
+    labs(title = title_parts) +
+    theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+  
+  cat("\nUpSet plot created successfully!\n")
+  return(p)
+}
+
+
+
+
+# ============================================================================
+# PART 7: Focused Gene selection and Visualization Functions
+# ============================================================================
+
+#' Get Intersection Gene Lists
+#'
+#' Extract specific intersection gene lists from UpSet analysis,
+#' supporting any identifier column (e.g., gene_id, gene_name).
+#'
+#' @param driver_genes_list List of driver genes data frames.
+#' @param contrasts Vector of contrast names (must be names in driver_genes_list).
+#' @param intersection_type Type of intersection to extract.
+#'   Options: 
+#'   - "union": all genes appearing in any contrast
+#'   - "intersection": genes common to all contrasts
+#'   - "unique_to_X": genes only in contrast X (replace X with actual name)
+#' @param column Name of the column to extract (e.g., "gene_id", "gene_name"). Default: "gene_id".
+#' @return A character vector of values from the specified column.
+#' @examples
+#' # Get union of gene names
+#' get_intersection_genes(results$driver_genes, c("c2_vs_c1", "c3_vs_c2"), 
+#'                        intersection_type = "union", column = "gene_name")
+get_intersection_genes <- function(driver_genes_list, 
+                                  contrasts,
+                                  intersection_type = "union",
+                                  column = "gene_id") {
+  
+  # Validate inputs
+  if (is.null(contrasts) || length(contrasts) == 0) {
+    stop("At least one contrast must be provided.")
+  }
+  missing_contrasts <- contrasts[!contrasts %in% names(driver_genes_list)]
+  if (length(missing_contrasts) > 0) {
+    stop("Contrast(s) not found in driver_genes_list: ", paste(missing_contrasts, collapse = ", "))
+  }
+  
+  # Check that all data frames have the requested column
+  for (cn in contrasts) {
+    df <- driver_genes_list[[cn]]
+    if (!column %in% names(df)) {
+      stop("Column '", column, "' not found in contrast '", cn, "'. Available columns: ", 
+           paste(names(df), collapse = ", "))
+    }
+  }
+  
+  # Extract the specified column from each contrast
+  gene_sets <- lapply(contrasts, function(x) {
+    vals <- driver_genes_list[[x]][[column]]
+    # Ensure it's a character vector (handles factors, etc.)
+    as.character(vals)
+  })
+  names(gene_sets) <- contrasts
+  
+  # Compute intersection/union/etc.
+  if (intersection_type == "union") {
+    result <- unique(unlist(gene_sets))
+    
+  } else if (intersection_type == "intersection") {
+    if (length(gene_sets) == 1) {
+      result <- unique(gene_sets)
+    } else {
+      result <- Reduce(intersect, gene_sets)
+    }
+    
+  } else if (grepl("^unique_to_", intersection_type)) {
+    target <- gsub("unique_to_", "", intersection_type)
+    if (!target %in% contrasts) {
+      stop("Target contrast '", target, "' not in provided contrasts: ", paste(contrasts, collapse = ", "))
+    }
+    others <- setdiff(contrasts, target)
+    target_vals <- gene_sets[[target]]
+    other_vals <- unlist(gene_sets[others])
+    result <- setdiff(target_vals, other_vals)
+    
+  } else {
+    stop("Unknown intersection_type: '", intersection_type, "'. Supported: 'union', 'intersection', 'unique_to_X'.")
+  }
+  
+  return(result)
+}
+
+
+#' Plot Gene Loading Vectors in PC Space with Pagination
+#' 
+#' Visualizes gene loading vectors decomposed into PC1 and PC2 components,
+#' with automatic pagination if genes exceed the layout capacity
+#' 
+#' @param gene_list Vector of gene IDs or gene names to plot
+#' @param pca_result PCA result object from prcomp()
+#' @param gene_annotations Data frame with gene annotations
+#' @param arrow_size Size of arrow heads (default: 0.3)
+#' @param arrow_width Width of arrow lines (default: 1)
+#' @param pc1_color Color for PC1 component arrow (default: "#E41A1C" red)
+#' @param pc2_color Color for PC2 component arrow (default: "gray60")
+#' @param total_color Color for total vector arrow (default: "black")
+#' @param use_gene_names Logical, whether gene_list contains gene names (default: TRUE)
+#' @param ncol Number of columns in facet layout (default: 4)
+#' @param nrow Number of rows in facet layout (default: 4)
+#' @return List of ggplot objects (one per page)
+plot_gene_loading_vectors <- function(gene_list,
+                                           pca_result,
+                                           gene_annotations,
+                                           arrow_size = 0.3,
+                                           arrow_width = 1,
+                                           pc1_color = "#E41A1C",
+                                           pc2_color = "gray60",
+                                           total_color = "black",
+                                           use_gene_names = TRUE,
+                                           ncol = 4,
+                                           nrow = 4) {
+  
+  # --- Step 1: Match gene_list to gene_id ---
+  if (use_gene_names) {
+    # Convert gene names to gene IDs
+    gene_map <- gene_annotations %>%
+      filter(gene_name %in% gene_list) %>%
+      dplyr::select(gene_id, gene_name) %>%
+      distinct()
+    
+    if (nrow(gene_map) == 0) {
+      stop("No genes found matching the provided gene names!")
+    }
+    
+    missing_genes <- setdiff(gene_list, gene_map$gene_name)
+    if (length(missing_genes) > 0) {
+      warning("The following genes were not found: ", 
+              paste(missing_genes, collapse = ", "))
+    }
+    
+    # Preserve original order
+    gene_map <- gene_map[match(intersect(gene_list, gene_map$gene_name), gene_map$gene_name), ]
+    gene_ids <- gene_map$gene_id
+    
+  } else {
+    # Assume gene_list contains gene IDs
+    gene_ids <- gene_list
+    
+    gene_map <- gene_annotations %>%
+      filter(gene_id %in% gene_ids) %>%
+      dplyr::select(gene_id, gene_name) %>%
+      distinct()
+    
+    if (nrow(gene_map) == 0) {
+      stop("No genes found matching the provided gene IDs!")
+    }
+    
+    # Preserve original order
+    gene_map <- gene_map[match(intersect(gene_ids, gene_map$gene_id), gene_map$gene_id), ]
+  }
+  
+  # --- Step 2: Calculate pagination ---
+  genes_per_page <- ncol * nrow
+  n_genes <- nrow(gene_map)
+  n_pages <- ceiling(n_genes / genes_per_page)
+  
+  cat("Total genes:", n_genes, "| Layout:", ncol, "x", nrow, 
+      "| Genes per page:", genes_per_page, "| Pages:", n_pages, "\n")
+  
+  # --- Step 3: Extract all gene loadings ---
+  loadings <- pca_result$rotation
+  
+  all_gene_loadings <- data.frame(
+    gene_id = rownames(loadings),
+    PC1 = loadings[, "PC1"],
+    PC2 = loadings[, "PC2"],
+    stringsAsFactors = FALSE
+  ) %>%
+    filter(gene_id %in% gene_map$gene_id) %>%
+    left_join(gene_map, by = "gene_id") %>%
+    mutate(
+      neg_PC1 = -PC1,
+      magnitude = sqrt(neg_PC1^2 + PC2^2)
+    )
+  
+  # Calculate global max for consistent scales across pages
+  global_max_abs <- max(abs(c(all_gene_loadings$neg_PC1, all_gene_loadings$PC2))) * 1.2
+  
+  # --- Step 4: Create plots for each page ---
+  plot_list <- list()
+  
+  for (page in 1:n_pages) {
+    start_idx <- (page - 1) * genes_per_page + 1
+    end_idx <- min(page * genes_per_page, n_genes)
+    
+    genes_this_page <- gene_map$gene_id[start_idx:end_idx]
+    
+    cat("  Page", page, ": genes", start_idx, "to", end_idx, 
+        "(", length(genes_this_page), "genes )\n")
+    
+    # Filter loadings for this page
+    gene_loadings_page <- all_gene_loadings %>%
+      filter(gene_id %in% genes_this_page)
+    
+    # Create arrow data for this page
+    arrow_data_list <- lapply(1:nrow(gene_loadings_page), function(i) {
+      gene_row <- gene_loadings_page[i, ]
+      
+      data.frame(
+        gene_name = rep(gene_row$gene_name, 3),
+        component = c("PC1 (-PC1)", "PC2", "Total"),
+        x_start = c(0, 0, 0),
+        y_start = c(0, 0, 0),
+        x_end = c(gene_row$neg_PC1, 0, gene_row$neg_PC1),
+        y_end = c(0, gene_row$PC2, gene_row$PC2),
+        stringsAsFactors = FALSE
+      )
+    })
+    
+    arrow_data <- do.call(rbind, arrow_data_list)
+    
+    # Set factor levels for proper ordering
+    arrow_data$component <- factor(
+      arrow_data$component,
+      levels = c("Total", "PC1 (-PC1)", "PC2")
+    )
+    
+    # Ensure gene_name is factor with correct order for faceting
+    gene_loadings_page$gene_name <- factor(
+      gene_loadings_page$gene_name,
+      levels = gene_loadings_page$gene_name
+    )
+    arrow_data$gene_name <- factor(
+      arrow_data$gene_name,
+      levels = levels(gene_loadings_page$gene_name)
+    )
+    
+    # Create plot
+    p <- ggplot() +
+      # Origin axes
+      geom_hline(yintercept = 0, linetype = "solid", 
+                 color = "gray80", linewidth = 0.5) +
+      geom_vline(xintercept = 0, linetype = "solid", 
+                 color = "gray80", linewidth = 0.5) +
+      # Arrow vectors
+      geom_segment(data = arrow_data,
+                   aes(x = x_start, y = y_start, 
+                       xend = x_end, yend = y_end,
+                       color = component, 
+                       linetype = component,
+                       linewidth = component),
+                   arrow = arrow(length = unit(arrow_size, "cm"), 
+                                type = "closed")) +
+      # Component labels
+      geom_text(data = gene_loadings_page,
+                aes(x = neg_PC1/2, y = -global_max_abs * 0.15, 
+                    label = sprintf("%.4f", neg_PC1)),
+                size = 2.5, color = pc1_color, fontface = "bold") +
+      geom_text(data = gene_loadings_page,
+                aes(x = -global_max_abs * 0.15, y = PC2/2, 
+                    label = sprintf("%.4f", PC2)),
+                size = 2.5, color = pc2_color, fontface = "bold", angle = 90) +
+      # Scales
+      scale_color_manual(
+        name = "Component",
+        values = c("Total" = total_color, 
+                   "PC1 (-PC1)" = pc1_color, 
+                   "PC2" = pc2_color)
+      ) +
+      scale_linetype_manual(
+        name = "Component",
+        values = c("Total" = "solid", 
+                   "PC1 (-PC1)" = "solid", 
+                   "PC2" = "solid")
+      ) +
+      scale_linewidth_manual(
+        name = "Component",
+        values = c("Total" = arrow_width * 1.2, 
+                   "PC1 (-PC1)" = arrow_width, 
+                   "PC2" = arrow_width)
+      ) +
+      # Facet by gene
+      facet_wrap(~ gene_name, ncol = ncol, nrow = nrow) +
+      # Labels and theme
+      labs(
+        x = "Disease Axis (-PC1)",
+        y = "PC2 (Orthogonal Axis)",
+        title = "Gene Loading Vector Decomposition",
+        subtitle = sprintf(
+          "Page %d/%d | Genes %d-%d of %d | Red: PC1, Gray: PC2, Black: Total",
+          page, n_pages, start_idx, end_idx, n_genes
+        )
+      ) +
+      coord_fixed(ratio = 1, xlim = c(-global_max_abs, global_max_abs), 
+                  ylim = c(-global_max_abs, global_max_abs)) +
+      theme_minimal(base_size = 11) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        plot.subtitle = element_text(hjust = 0.5, size = 9, color = "gray40"),
+        strip.text = element_text(face = "bold", size = 10),
+        strip.background = element_rect(fill = "gray95", color = "gray80"),
+        axis.title = element_text(face = "bold"),
+        legend.position = "bottom",
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(color = "gray80", fill = NA, linewidth = 0.5)
+      )
+    
+    plot_list[[page]] <- p
+  }
+  
+  cat("Created", length(plot_list), "plot(s)\n")
+  
+  return(plot_list)
+}
+
+
+#' Plot Multiple Gene Lists with Automatic Pagination
+#' 
+#' Process multiple gene lists and combine all plots
+#' 
+#' @param gene_lists Named list of gene vectors
+#' @param ... Other parameters passed to plot_gene_loading_vectors_auto
+#' @return Named list of plot lists
+plot_multiple_gene_lists <- function(gene_lists, ...) {
+  
+  all_plots <- list()
+  
+  for (list_name in names(gene_lists)) {
+    cat("\n=== Processing gene list:", list_name, "===\n")
+    
+    plots <- plot_gene_loading_vectors(
+      gene_list = gene_lists[[list_name]],
+      ...
+    )
+    
+    all_plots[[list_name]] <- plots
+  }
+  
+  # Flatten to single list
+  flat_plots <- unlist(all_plots, recursive = FALSE)
+  
+  cat("\n=== Total plots created:", length(flat_plots), "===\n")
+  
+  return(flat_plots)
+}
+
+
+# ============================================================================
 # USAGE
 # ============================================================================
 # load results from driver gene calculation pipeline
@@ -876,6 +1334,60 @@ p5.4 <- plot_driver_genes_in_cone(
   bg_alpha = 0.2
 )
 
+p6.1 <- plot_driver_genes_upset(
+  driver_genes_list = results$driver_genes,
+  contrasts = c("c1_vs_c1_star", "c2_vs_c1", "c3_vs_c2"),
+  filter_pattern = NULL,
+  filter_loading_strength = NULL,
+  filter_fc_strength = NULL,
+  top_n_intersections = 15
+)
+p6.2 <- plot_driver_genes_upset(
+  driver_genes_list = results$driver_genes,
+  contrasts = c("c1_vs_c1_star", "c2_vs_c1", "c3_vs_c2"),
+  filter_pattern = "Upregulated-Cis (Strong Pro-disease)",
+  filter_loading_strength = NULL,
+  filter_fc_strength = NULL,
+  top_n_intersections = 15
+)
+p6.3 <- plot_driver_genes_upset(
+  driver_genes_list = results$driver_genes,
+  contrasts = c("c1_vs_c1_star", "c2_vs_c1", "c3_vs_c2"),
+  filter_pattern = "Downregulated-Trans (Pro-disease)",
+  filter_loading_strength = NULL,
+  filter_fc_strength = NULL,
+  top_n_intersections = 15
+)
+
+gene_list.1 <- get_intersection_genes(
+                driver_genes_list = results$driver_genes,
+                contrasts = c("c1_vs_c1_star", "c2_vs_c1"),
+                intersection_type = "intersection",
+                column = "gene_name"
+              )
+gene_list.2 <- get_intersection_genes(
+                driver_genes_list = results$driver_genes,
+                contrasts = c("c2_vs_c1", "c3_vs_c2"),
+                intersection_type = "intersection",
+                column = "gene_name"
+              )
+p7 <- plot_multiple_gene_lists(
+        gene_lists = list(
+          "c1_vs_c1_star & c2_vs_c1" = gene_list.1,
+          "c2_vs_c1 & c3_vs_c2" = gene_list.2
+        ),
+        pca_result = results$project_data$pca_result,
+        gene_annotations = results$project_data$gene_annotations,
+        arrow_size = 0.25,
+        arrow_width = 0.8,
+        pc1_color = "#E41A1C",
+        pc2_color = "gray60",
+        total_color = "black",
+        use_gene_names = TRUE,
+        ncol = 4,
+        nrow = 4
+      )
+
 # Save results
 cat("\nSaving results...\n")
 output_dir <- file.path(BASE_DIR, "08.eigengene/figures")
@@ -889,9 +1401,18 @@ ggsave(filename = file.path(output_dir, "03.gene_cone_space.pdf"), plot = p3, wi
 
 ggsave(filename = file.path(output_dir, "04.gene_polar_cone.pdf"), plot = p4, width = 6, height = 6)
 
-plots <- list(p5.1, p5.2, p5.3, p5.4)
+plots_5 <- list(p5.1, p5.2, p5.3, p5.4)
 pdf(file.path(output_dir, "05.driver_genes_cone_plots.pdf"), width = 6, height = 6)
-walk(plots, print)
+walk(plots_5, print)
+dev.off()
+
+plots_6 <- list(p6.1, p6.2, p6.3)
+pdf(file.path(output_dir, "06.driver_genes_upset_plots.pdf"), width = 8, height = 6)
+walk(plots_6, print)
+dev.off()
+
+pdf(file.path(output_dir, "07.driver_genes_multiple_gene_lists.pdf"), width = 14, height = 14)
+walk(p7, print)
 dev.off()
 
 cat("Plots saved to:", output_dir, "\n")
