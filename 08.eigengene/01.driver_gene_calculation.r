@@ -417,7 +417,7 @@ calculate_disease_contribution <- function(eigengenes, deg_results, contrasts = 
 #' @param vst_mat VST expression matrix
 #' @return Filtered driver genes
 select_driver_genes <- function(contrib_data_list, gene_annotations, vst_mat,
-                                min_baseMean = 50,
+                                min_baseMean = 10,
                                 min_abs_log2FC = 1,
                                 max_padj = 0.05,
                                 min_abs_cgd_loading = 0.01,
@@ -682,11 +682,11 @@ run_driver_gene_analysis <- function() {
     contrib_data,
     project_data$gene_annotations,
     project_data$vst_mat,
-    min_baseMean = 50,
+    min_baseMean = 10,
     min_abs_log2FC = 1,
     max_padj = 0.05,
     min_abs_cgd_loading = 0.01,
-    only_protein_coding = TRUE
+    only_protein_coding = FALSE
   )
   
   # Step 7: Classify patterns

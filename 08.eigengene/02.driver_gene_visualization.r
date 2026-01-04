@@ -1267,6 +1267,7 @@ plot_multiple_gene_lists <- function(gene_lists, ...) {
 # ============================================================================
 # load results from driver gene calculation pipeline
 
+BASE_DIR <- "/disk2/cai113/data/stateTrans"
 load(file.path(BASE_DIR, "08.eigengene", "driver_gene_selection_results.rdata"))
 # draw plots
 p1 <- plot_gene_pc_space(
